@@ -1,0 +1,224 @@
+import json
+import time
+import requests
+import websocket
+import threading
+import os
+
+TOKEN_FILE = "token.json"
+BASE_URL = "https://craft-world.gg"
+GRAPHQL_URL = f"{BASE_URL}/graphql?query=query+%7B+exchangePriceList+%7B+baseSymbol+prices+%7B+referenceSymbol+amount+recommendation+%7D+%7D+%7D"
+
+# === Coin yang mau di-highlight ===
+TARGET_COINS = ["STEEL"]
+
+# === ANSI Warna ===
+COLOR_RESET = "\033[0m"
+COLOR_GREEN = "\033[92m"
+COLOR_RED = "\033[91m"
+COLOR_YELLOW = "\033[93m"
+
+# === Fungsi Token ===
+def muat_token():
+    try:
+        with open(TOKEN_FILE, "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print("[❌] token.json tidak ditemukan.")
+        return None
+
+def simpan_token_dengan_expired(jwt_token, refresh_token, expires_in):
+    expired_at = int(time.time()) + int(expires_in)
+    data = {
+        "jwt": jwt_token,
+        "refresh_token": refresh_token,
+        "expired_at": expired_at
+    }
+    with open(TOKEN_FILE, "w") as f:
+        json.dump(data, f)
+    print("[✅] Token baru berhasil disimpan ke token.json.")
+
+def refresh_id_token(refresh_token):
+    url = "https://securetoken.googleapis.com/v1/token?key=AIzaSyDgDDykbRrhbdfWUpm1BUgj4ga7d_-wy_g"
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token
+    }
+    response = requests.post(url, data=data, headers=headers)
+    response.raise_for_status()
+    result = response.json()
+    simpan_token_dengan_expired(result["id_token"], result["refresh_token"], result["expires_in"])
+    return result["id_token"]
+
+def get_valid_token():
+    data = muat_token()
+    if not data:
+        return None
+    now = int(time.time())
+    if now < data["expired_at"] - 60:
+        return data["jwt"]
+    else:
+        print("[♻️] Token expired, mencoba refresh...")
+        return refresh_id_token(data["refresh_token"])
+
+def get_auth_header():
+    jwt = get_valid_token()
+    if not jwt:
+        raise Exception("Gagal mendapatkan JWT token.")
+    return {
+        "authorization": f"Bearer jwt_{jwt}",
+        "x-app-version": "1.0.3",
+        "content-type": "application/json",
+        "accept": "*/*",
+        "origin": "https://craft-world.gg",
+        "referer": "https://craft-world.gg/?ref-id=project-voyager",
+        "user-agent": "Mozilla/5.0 (Linux; Android 10; K) Chrome/130.0.0.0"
+    }
+
+def get_socket_token():
+    headers = get_auth_header()
+    resp = requests.get(f"{BASE_URL}/api/1/socket/token", headers=headers)
+    resp.raise_for_status()
+    return resp.json()["token"]
+
+# === API GeckoTerminal COIN price ===
+GECKO_URL = "https://app.geckoterminal.com/api/p1/ronin/pools/0xda021b3d91f82bf2bcfc1a8709545c3a643d47de"
+
+def get_coin_usd_data():
+    try:
+        headers = {
+            "accept": "application/json, text/plain, */*",
+            "origin": "https://www.geckoterminal.com",
+            "referer": "https://www.geckoterminal.com/",
+            "user-agent": "Mozilla/5.0"
+        }
+        resp = requests.get(GECKO_URL, headers=headers)
+        resp.raise_for_status()
+        attrs = resp.json()["data"]["attributes"]
+        return float(attrs["price_in_usd"]), attrs["price_percent_change"]
+    except Exception as e:
+        print("[❌] Gagal ambil harga COIN dari GeckoTerminal:", e)
+        return None, None
+
+# === Fungsi Cek Market Real-time ===
+def cek_market_loop():
+    previous_prices = {}
+    last_status = {}
+    last_color = {}
+    initial_prices = {}
+
+    while True:
+        try:
+            headers = get_auth_header()
+            resp = requests.get(GRAPHQL_URL, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            prices = data["data"]["exchangePriceList"]["prices"]
+
+            # Ambil harga COIN dalam USD
+            coin_usd, coin_change = get_coin_usd_data()
+
+            os.system("clear")
+            print("📈 Update Harga Market (Real-time):\n")
+            if coin_usd:
+                print(f"💰 1 COIN = ${coin_usd:.6f} ({coin_change})\n")
+
+            for item in prices:
+                symbol = item["referenceSymbol"]
+                amount = item["amount"]     # harga dalam COIN
+                recommendation = item["recommendation"]
+
+                if symbol not in initial_prices:
+                    initial_prices[symbol] = amount
+
+                old_price = previous_prices.get(symbol)
+                if old_price is not None and old_price > 0:
+                    if amount > old_price:
+                        status, warna = "📈 NAIK", COLOR_GREEN
+                    elif amount < old_price:
+                        status, warna = "📉 TURUN", COLOR_RED
+                    else:
+                        status = last_status.get(symbol, "⏸️ TETAP")
+                        warna = last_color.get(symbol, COLOR_YELLOW)
+                else:
+                    status, warna = "data awal", COLOR_YELLOW
+
+                perubahan_awal = amount - initial_prices[symbol]
+                persen_awal = (perubahan_awal / initial_prices[symbol]) * 100
+
+                # Hitung harga USD
+                usd_value = amount * coin_usd if coin_usd else None
+
+                if symbol in TARGET_COINS:
+                    if usd_value:
+                        print(
+                            f"{warna}⭐ {symbol}: {amount:.4f} COIN "
+                            f"(${usd_value:.6f}) "
+                            f"({status} {persen_awal:+.2f}%, saran: {recommendation}) ⭐{COLOR_RESET}"
+                        )
+                    else:
+                        print(
+                            f"{warna}⭐ {symbol}: {amount:.4f} COIN "
+                            f"({status} {persen_awal:+.2f}%, saran: {recommendation}) ⭐{COLOR_RESET}"
+                        )
+                else:
+                    if usd_value:
+                        print(
+                            f"{warna}{symbol}: {amount:.4f} COIN "
+                            f"(${usd_value:.6f}) "
+                            f"({status} {persen_awal:+.2f}%, saran: {recommendation}){COLOR_RESET}"
+                        )
+                    else:
+                        print(
+                            f"{warna}{symbol}: {amount:.4f} COIN "
+                            f"({status} {persen_awal:+.2f}%, saran: {recommendation}){COLOR_RESET}"
+                        )
+
+                previous_prices[symbol] = amount
+                last_status[symbol] = status
+                last_color[symbol] = warna
+
+        except Exception as e:
+            print("[❌] Gagal cek market:", e)
+
+        time.sleep(5)
+
+# === WebSocket (opsional) ===
+def ws_on_message(ws, message):
+    if '"market"' in message or '"price"' in message:
+        print("📦 Data Market:", message)
+
+def ws_on_error(ws, error):
+    print("WebSocket Error:", error)
+
+def ws_on_close(ws, code, msg):
+    print("WebSocket Closed:", code, msg)
+
+def ws_on_open(ws):
+    print("✅ WebSocket Connected")
+
+# === Main ===
+def main():
+    try:
+        token = get_socket_token()
+        print("[✅] Socket Token:", token)
+    except Exception as e:
+        print("[❌] Gagal mendapatkan socket token:", e)
+        return
+
+    ws_url = f"wss://craft-world.gg/api/1/socket?token={token}"
+    ws = websocket.WebSocketApp(ws_url,
+                                on_open=ws_on_open,
+                                on_message=ws_on_message,
+                                on_error=ws_on_error,
+                                on_close=ws_on_close)
+
+    ws_thread = threading.Thread(target=ws.run_forever, kwargs={"ping_interval": 15})
+    ws_thread.daemon = True
+    ws_thread.start()
+
+    cek_market_loop()
+
+if __name__ == "__main__":
+    main()
