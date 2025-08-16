@@ -1,0 +1,296 @@
+import requests
+import json
+import time
+import uuid
+
+# Simpan token dan refresh token ke file dengan waktu expired
+def simpan_token_dengan_expired(jwt_token, refresh_token, expires_in):
+    expired_at = int(time.time()) + int(expires_in)
+    data = {
+        "jwt": jwt_token,
+        "refresh_token": refresh_token,
+        "expired_at": expired_at
+    }
+    with open("token.json", "w") as f:
+        json.dump(data, f, indent=2)
+
+# Muat token dari file
+
+def muat_token():
+    with open("token.json") as f:
+        return json.load(f)
+
+# Refresh idToken menggunakan refresh_token
+
+def refresh_id_token(refresh_token):
+    url = "https://securetoken.googleapis.com/v1/token?key=AIzaSyDgDDykbRrhbdfWUpm1BUgj4ga7d_-wy_g"
+    headers = {"Content-Type": "application/x-www-form-urlencoded"}
+    data = {
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token
+    }
+
+    response = requests.post(url, data=data, headers=headers)
+    response.raise_for_status()
+    result = response.json()
+
+    # Simpan idToken baru ke file
+    simpan_token_dengan_expired(result["id_token"], result["refresh_token"], result["expires_in"])
+    return result["id_token"]
+
+# Dapatkan token valid (otomatis refresh jika expired)
+
+def get_valid_token():
+    data = muat_token()
+    now = int(time.time())
+
+    if now < data["expired_at"] - 60:
+        return data["jwt"]
+    else:
+        print("[⚠️] Token expired, sedang refresh...")
+        return refresh_id_token(data["refresh_token"])
+
+# Step 0: Kirim email agar OTP dikirim ke inbox
+def send_login_email(email):
+    url = "https://embedded-wallet.thirdweb.com/api/2024-05-05/login/email"
+    headers = {
+        "Content-Type": "application/json",
+        "x-client-id": "25bc35076e7821aa8a5779982e2d04b2",
+        "x-session-nonce": "random-session-nonce",  # bisa kamu ganti dengan UUID jika perlu
+        "x-sdk-platform": "unity",
+        "x-embedded-wallet-version": "unity:5.19.1",
+        "x-sdk-version": "5.19.1",
+        "x-sdk-name": "UnitySDK_WebGL",
+        "x-sdk-os": "WebGLPlayer",
+        "x-bundle-id": "craftworld",
+        "origin": "https://craft-world.gg",
+        "referer": "https://craft-world.gg/"
+    }
+    data = {"email": email}
+
+    response = requests.post(url, json=data, headers=headers)
+    response.raise_for_status()
+    print(f"✅ Kode OTP dikirim ke {email}.")
+
+# Step 1: Login pakai email + OTP ke thirdweb
+def get_embedded_wallet_token(email, otp):
+    url = "https://embedded-wallet.thirdweb.com/api/2024-05-05/login/email/callback"
+    headers = {
+        "Content-Type": "application/json",
+        "x-client-id": "25bc35076e7821aa8a5779982e2d04b2",
+        "x-session-nonce": str(uuid.uuid4()),  # nonce random sesuai sniff
+        "x-sdk-platform": "unity",
+        "x-embedded-wallet-version": "unity:5.19.1",
+        "x-sdk-version": "5.19.1",
+        "x-sdk-name": "UnitySDK_WebGL",
+        "x-sdk-os": "WebGLPlayer",
+        "x-bundle-id": "craftworld",
+        "origin": "https://craft-world.gg",
+        "referer": "https://craft-world.gg/"
+    }
+    data = {
+        "email": email,
+        "code": otp
+    }
+
+    response = requests.post(url, json=data, headers=headers)
+    response.raise_for_status()
+    result = response.json()
+    token = result['storedToken']['cookieString']
+    return token
+
+# Step 2: Generate enclave wallet
+def generate_enclave_wallet(token):
+    url = "https://embedded-wallet.thirdweb.com/api/v1/enclave-wallet/generate"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer embedded-wallet-token:{token}",
+        "x-client-id": "25bc35076e7821aa8a5779982e2d04b2",
+        "x-session-nonce": str(uuid.uuid4()),
+        "x-sdk-platform": "unity",
+        "x-sdk-name": "UnitySDK_WebGL",
+        "x-sdk-os": "WebGLPlayer",
+        "x-bundle-id": "craftworld",
+        "x-embedded-wallet-version": "unity:5.19.1",
+        "x-sdk-version": "5.19.1",
+        "origin": "https://craft-world.gg",
+        "referer": "https://craft-world.gg/",
+
+    }
+    response = requests.post(url, headers=headers)
+    response.raise_for_status()
+    return response.json()
+    time.sleep(2)
+
+# Step 3: Get signable payload dari Craft World
+def get_payload_to_sign(wallet_address):
+#    wallet_address = wallet["wallet"]["address"]
+
+    url = "https://craft-world.gg/auth/payload"
+    headers = {
+        "Content-Type": "application/json; charset=utf-8",
+        "Origin": "https://craft-world.gg",
+        "Referer": "https://craft-world.gg/?ref-id=project-voyager",
+        "X-SDK-Version": "5.19.1",
+        "X-SDK-Name": "UnitySDK_WebGL",
+        "X-SDK-OS": "WebGLPlayer",
+        "X-Bundle-Id": "craftworld",
+        "X-SDK-Platform": "unity",
+        "X-Client-Id": "25bc35076e7821aa8a5779982e2d04b2",
+        "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36",
+        "Accept": "*/*",
+        "DNT": "1",
+        "Save-Data": "on",
+    }
+
+    payload = {
+        "address": wallet_address,
+        "chainId": "84532"
+    }
+
+    response = requests.post(url, headers=headers, json=payload)
+    response.raise_for_status()
+    return response.json()
+    time.sleep(2)
+
+def format_siwe_message(payload):
+    return (
+        f"{payload['domain']} wants you to sign in with your Ethereum account:\n"
+        f"{payload['address']}\n\n"
+        f"{payload['statement']}\n\n"
+        f"URI: {payload['uri']}\n"
+        f"Version: {payload['version']}\n"
+        f"Chain ID: {payload['chain_id']}\n"
+        f"Nonce: {payload['nonce']}\n"
+        f"Issued At: {payload['issued_at']}\n"
+        f"Expiration Time: {payload['expiration_time']}"
+    )
+
+# Step 4: Sign message pakai thirdweb
+def sign_payload(token, message):
+    url = "https://embedded-wallet.thirdweb.com/api/v1/enclave-wallet/sign-message"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer embedded-wallet-token:{token}",
+        "x-client-id": "25bc35076e7821aa8a5779982e2d04b2",
+        "x-session-nonce": str(uuid.uuid4()),
+        "x-sdk-platform": "unity",
+        "x-sdk-name": "UnitySDK_WebGL",
+        "x-sdk-os": "WebGLPlayer",
+        "x-bundle-id": "craftworld",
+        "x-embedded-wallet-version": "unity:5.19.1",
+        "x-sdk-version": "5.19.1",
+        "origin": "https://craft-world.gg",
+        "referer": "https://craft-world.gg/",
+    }
+ #   data = {"message": message}
+    data = {
+    "messagePayload": {
+        "message": message,
+        "isRaw": False
+    }
+}
+    response = requests.post(url, json=data, headers=headers)
+    response.raise_for_status()
+    return response.json()["signature"]
+    time.sleep(2)
+
+# Step 5: Submit ke Craft World login
+def login_craft_world(payload, signature):
+    url = "https://craft-world.gg/auth/login"
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0",  # opsional, tapi bisa ditambah
+        "x-client-id": "25bc35076e7821aa8a5779982e2d04b2",
+        "x-session-nonce": str(uuid.uuid4()),
+        "x-sdk-platform": "unity",
+        "x-sdk-name": "UnitySDK_WebGL",
+        "x-sdk-os": "WebGLPlayer",
+        "x-bundle-id": "craftworld",
+        "x-embedded-wallet-version": "unity:5.19.1",
+        "x-sdk-version": "5.19.1",
+        "origin": "https://craft-world.gg",
+        "referer": "https://craft-world.gg/",
+    }
+    data = {
+        "payload": {
+            "Payload": payload,
+            "Signature": signature
+        }
+    }
+    response = requests.post(url, json=data, headers=headers)
+
+    if response.status_code != 200:
+        print(f"[❌] Login failed: {response.status_code} - {response.text}")
+
+    response.raise_for_status()
+    return response.json()
+    time.sleep(2)
+
+def firebase_sign_in_with_custom_token(custom_token):
+    url = "https://identitytoolkit.googleapis.com/v1/accounts:signInWithCustomToken"
+    params = {"key": "AIzaSyDgDDykbRrhbdfWUpm1BUgj4ga7d_-wy_g"}
+    headers = {
+        "Content-Type": "application/json",
+        "x-firebase-gmpid": "1:54312317442:web:585f62354db53c142bed1b",
+        "x-client-version": "Chrome/JsCore/11.4.0/FirebaseCore-web",
+        "origin": "https://craft-world.gg",
+        "referer": "https://craft-world.gg/",
+        "User-Agent": "Mozilla/5.0"
+    }
+    data = {
+        "token": custom_token,
+        "returnSecureToken": True
+    }
+
+    response = requests.post(url, params=params, headers=headers, json=data)
+    response.raise_for_status()
+    return response.json()
+
+# --- Eksekusi script ---
+if __name__ == "__main__":
+    print("=== Craft World Login Script ===")
+    email = input("Masukkan email: ")
+
+    print("[0] Mengirim kode OTP ke email...")
+    send_login_email(email)
+    print("⌛ Tunggu sebentar, lalu periksa email kamu...")
+
+    otp = input("Masukkan kode OTP dari email: ")
+
+    print("[1] Mengambil embedded wallet token...")
+    ew_token = get_embedded_wallet_token(email, otp)
+    print("✅ embedded-wallet-token berhasil.")
+
+    print("[2] Generate enclave wallet...")
+    wallet_info = generate_enclave_wallet(ew_token)
+    wallet_address = wallet_info['wallet']['address']
+    print(f"✅ Wallet: {wallet_address}")
+
+    print("[3] Mengambil payload untuk ditandatangani...")
+    payload_data = get_payload_to_sign(wallet_address)
+    payload = payload_data["payload"]
+
+    # Format menjadi string
+    message = format_siwe_message(payload)
+    print(f"✅ Payload:\n{message[:100]}...")
+
+    print("[4] Menandatangani payload...")
+    signature = sign_payload(ew_token, message)
+    print(f"✅ Signature: {signature}")
+
+    print("[5] Login ke Craft World...")
+    login_result = login_craft_world(payload, signature)
+
+    custom_token = login_result["customToken"]
+
+    print(f"[6] Sign in ke Firebase pakai customToken...")
+    firebase_result = firebase_sign_in_with_custom_token(custom_token)
+    id_token = firebase_result["idToken"]
+    refresh_token = firebase_result["refreshToken"]
+    expires_in = firebase_result["expiresIn"]
+
+    print("✅ Menyimpan token dan refresh token...")
+    simpan_token_dengan_expired(id_token, refresh_token, expires_in)
+
+    print(f"🎉 Login lengkap! Token disimpan di token.json")
